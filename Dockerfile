@@ -6,19 +6,19 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
 
 # Copy main Python files from root
-COPY main.py processor.py .  
+COPY main.py processor.py requirements.txt .  
 
-# Copy app subfolders
-COPY app/ ./app  
-COPY config/ ./config
+# Copy app contents (not the folder itself)
+COPY app ./app
 COPY assets/ ./assets
 
-# Copy Python dependencies
-COPY requirements.txt .
+# Create an empty config folder inside the container
+RUN mkdir -p config
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Expose port for Flask
 EXPOSE 5000
 
 # Run Flask app

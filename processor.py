@@ -9,6 +9,8 @@ from config.settings import FTP_LOCATIONS
 from mutagen.easyid3 import EasyID3
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, TDRC, TRCK, TCON, COMM, APIC, ID3NoHeaderError
+import paramiko
+import socket
 
 
 SILENCE_MS = 1500
@@ -70,6 +72,55 @@ def get_saturday_before(date_str):
     saturday = dt - timedelta(days=2)
     return saturday.strftime("%m-%d-%y")  
 
+def sftp_upload(files, host, user, password, remote_dir, rename=None, max_retries=3, progress=None):
+
+    if progress is None:
+        progress = lambda msg: print(msg)
+
+    rename_map = rename if isinstance(rename, dict) else {}
+
+    # Connect to SFTP
+    transport = paramiko.Transport((host, 22))
+    transport.connect(username=user, password=password)
+    sftp = paramiko.SFTPClient.from_transport(transport)
+
+    # Ensure directory exists
+    try:
+        sftp.chdir(remote_dir)
+    except IOError:
+        progress(f"📁 Remote directory not found, creating: {remote_dir}")
+        sftp.mkdir(remote_dir)
+        sftp.chdir(remote_dir)
+
+    for file_path in files:
+        local_name = os.path.basename(file_path)
+        remote_name = rename_map.get(local_name, local_name)
+
+        local_size = os.path.getsize(file_path)
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                progress(f"Uploading {remote_name} via SFTP (Attempt {attempt}/{max_retries})...")
+                sftp.put(file_path, remote_name)
+
+                # Verify upload
+                remote_size = sftp.stat(remote_name).st_size
+
+                if remote_size != local_size:
+                    raise Exception(f"Size mismatch local={local_size} remote={remote_size}")
+
+                progress(f"✔ Verified SFTP upload: {remote_name}")
+                break
+
+            except Exception as e:
+                progress(f"⚠️ Error uploading {remote_name}: {e}")
+                if attempt == max_retries:
+                    raise Exception(f"FAILED after {max_retries} attempts: {remote_name}")
+                time.sleep(2)
+
+    sftp.close()
+    transport.close()
+
 # def ftp_upload(file_paths, host, user, password, remote_dir="/", rename=None, max_retries=2):
 #     """
 #     Upload files to FTP server (plain FTP for testing) with retry.
@@ -111,41 +162,109 @@ def get_saturday_before(date_str):
 #                     else:
 #                         logging.error(f"❌ Failed to upload {up_file} after {max_retries} attempts")
 
+
+# def ftp_upload(files, host, user, password, remote_dir, rename=None, max_retries=3, progress=None):
+#     """
+#     Upload files to an FTP or FTPS server with automatic TLS detection.
+#     """
+
+#     if progress is None:
+#         progress = lambda msg: print(msg)
+
+#     rename_map = rename if isinstance(rename, dict) else {}
+
+#     # -------------------------------------
+#     # Try FTP first; if TLS required, retry with FTP_TLS
+#     # -------------------------------------
+#     def connect(try_tls=False):
+#         if try_tls:
+#             progress("🔐 Attempting FTPS (TLS)...")
+#             ftp = ftplib.FTP_TLS(host)
+#             ftp.login(user=user, passwd=password)
+#             ftp.prot_p()  # Secure data connection
+#         else:
+#             progress("🌐 Attempting plain FTP...")
+#             ftp = ftplib.FTP(host)
+#             ftp.login(user=user, passwd=password)
+
+#         ftp.cwd(remote_dir)
+#         return ftp
+
+#     # Try plain FTP — if TLS is required, fall back to FTPS
+#     try:
+#         ftp = connect(try_tls=False)
+#     except Exception as e:
+#         if "TLS" in str(e).upper() or "SSL" in str(e).upper() or "secure" in str(e).lower():
+#             progress(f"⚠️ Server requires TLS: {e}")
+#             ftp = connect(try_tls=True)
+#         else:
+#             raise
+
+#     # -------------------------------------
+#     # Upload files
+#     # -------------------------------------
+#     with ftp:
+#         for file_path in files:
+#             filename_local = os.path.basename(file_path)
+#             filename_remote = rename_map.get(filename_local, filename_local)
+#             local_size = os.path.getsize(file_path)
+
+#             for attempt in range(1, max_retries + 1):
+#                 try:
+#                     progress(f"⬆️ Uploading {filename_remote} (Attempt {attempt}/{max_retries})...")
+
+#                     with open(file_path, "rb") as f:
+#                         ftp.storbinary(f"STOR {filename_remote}", f)
+
+#                     # Verify remote size
+#                     remote_size = ftp.size(filename_remote)
+
+#                     if remote_size != local_size:
+#                         raise Exception(f"Size mismatch: local={local_size}, remote={remote_size}")
+
+#                     progress(f"✅ Verified: {filename_remote} uploaded successfully.")
+#                     break
+
+#                 except Exception as e:
+#                     progress(f"⚠️ Error uploading {filename_remote}: {e}")
+
+#                     if attempt == max_retries:
+#                         raise Exception(
+#                             f"❌ Upload failed after {max_retries} attempts: {filename_remote}"
+#                         )
+
+#                     time.sleep(2)
+
 def ftp_upload(files, host, user, password, remote_dir,
                rename=None, max_retries=3, progress=None):
     """
-    Upload files to an FTP server with retry and remote file-size verification.
-    Raises an exception if upload fails after retries.
+    Smart uploader:
+    1. Try plain FTP
+    2. If disabled, try FTPS
+    3. If disabled, try SFTP
     """
 
     if progress is None:
         progress = lambda msg: print(msg)
 
-    # Support renaming
-    rename_map = {}
-    if isinstance(rename, dict):
-        rename_map = rename
+    # Renaming support
+    rename_map = rename if isinstance(rename, dict) else {}
 
-    with ftplib.FTP(host) as ftp:
-        ftp.login(user=user, passwd=password)
+    # ---------- HELPER UPLOADERS ----------
+    def upload_via_ftp(ftp):
         ftp.cwd(remote_dir)
-
         for file_path in files:
             filename_local = os.path.basename(file_path)
             filename_remote = rename_map.get(filename_local, filename_local)
-
             local_size = os.path.getsize(file_path)
 
             for attempt in range(1, max_retries + 1):
                 try:
                     progress(f"Uploading {filename_remote} (Attempt {attempt}/{max_retries})...")
-
                     with open(file_path, "rb") as f:
                         ftp.storbinary(f"STOR {filename_remote}", f)
 
-                    # ---- VERIFY REMOTE FILE SIZE ----
                     remote_size = ftp.size(filename_remote)
-
                     if remote_size != local_size:
                         raise Exception(
                             f"File size mismatch: local={local_size}, remote={remote_size}"
@@ -156,13 +275,65 @@ def ftp_upload(files, host, user, password, remote_dir,
 
                 except Exception as e:
                     progress(f"⚠️ Error uploading {filename_remote}: {e}")
-
                     if attempt == max_retries:
-                        raise Exception(
-                            f"Upload failed after {max_retries} attempts: {filename_remote}"
-                        )
-
+                        raise
                     time.sleep(2)
+
+    # ---------- TRY PLAIN FTP ----------
+    progress("🌐 Attempting plain FTP...")
+    try:
+        with ftplib.FTP(host, timeout=10) as ftp:
+            ftp.login(user, password)
+            upload_via_ftp(ftp)
+            progress("✅ FTP upload successful.")
+            return True
+    except Exception as e:
+        progress(f"❌ FTP failed: {e}")
+
+    # ---------- TRY FTPS ----------
+    progress("🌐 Attempting FTPS...")
+    try:
+        ftps = ftplib.FTP_TLS(timeout=10)
+        ftps.connect(host)
+        ftps.login(user, password)
+        ftps.prot_p()   # Enable secure data channel
+        upload_via_ftp(ftps)
+        ftps.quit()
+        progress("✅ FTPS upload successful.")
+        return True
+    except Exception as e:
+        progress(f"❌ FTPS failed: {e}")
+
+    # ---------- TRY SFTP ----------
+    progress("🌐 Attempting SFTP...")
+    try:
+        transport = paramiko.Transport((host, 22))
+        transport.connect(username=user, password=password)
+        sftp = paramiko.SFTPClient.from_transport(transport)
+
+        try:
+            sftp.chdir(remote_dir)
+        except IOError:
+            # Create directory if missing
+            sftp.mkdir(remote_dir)
+            sftp.chdir(remote_dir)
+
+        for file_path in files:
+            filename_local = os.path.basename(file_path)
+            filename_remote = rename_map.get(filename_local, filename_local)
+
+            progress(f"Uploading {filename_remote} via SFTP...")
+            sftp.put(file_path, filename_remote)
+            progress(f"✓ SFTP upload complete: {filename_remote}")
+
+        sftp.close()
+        transport.close()
+        progress("✅ SFTP upload successful.")
+        return True
+
+    except Exception as e:
+        progress(f"❌ SFTP failed: {e}")
+        raise Exception("All upload methods failed.")
 
 
 def split_and_export(wav_path, output_dir, date_str, show_title="", guest="", artwork_path=None, progress_callback=None):
@@ -175,7 +346,10 @@ def split_and_export(wav_path, output_dir, date_str, show_title="", guest="", ar
 
     # --- Export H1 ---
     log("Starting H1 MP3 export...")
-    h1_audio = audio[0:int(58.833*60*1000)]
+    #h1_audio = audio[0:int(58.833*60*1000)]
+    h1_start_ms = int(6 * 60 * 1000)  # 6 minutes in milliseconds
+    h1_end_ms = int(58.833 * 60 * 1000)  # keep the same length
+    h1_audio = audio[h1_start_ms:h1_end_ms]
     h1_file = os.path.join(output_dir, f"stevebrown_{get_saturday_before(date_str)}_H1.mp3")
     h1_audio.export(h1_file, format="mp3", bitrate="320k")
     log(f"H1 exported: {h1_file}")

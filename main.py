@@ -9,27 +9,10 @@ from ftplib import FTP
 from config.settings import FTP_LOCATIONS  # your settings.py with FTP_PASS etc.
 from processor import upload_files_to_ftp
 
-UPLOAD_FOLDER = "/app/uploads"
-PROCESSED_FOLDER = "/app/processed"
+UPLOAD_FOLDER = "/app/app/uploads"
+PROCESSED_FOLDER = "/app/app/processed"
 
-# --- TESTING ONLY: clear processed and uploads folders on startup ---
-# Comment out these lines when not testing
-for folder in ["processed", "uploads"]:
-    folder_path = os.path.join(os.getcwd(), folder)
-    if os.path.exists(folder_path):
-        for file_name in os.listdir(folder_path):
-            file_path = os.path.join(folder_path, file_name)
-            try:
-                if os.path.isfile(file_path):
-                    os.remove(file_path)
-                    logging.info(f"Deleted {file_path} (testing cleanup)")
-            except Exception as e:
-                logging.warning(f"Failed to delete {file_path}: {e}")
-# --- TESTING ONLY---
-
-
-
-app = Flask(__name__, template_folder="app/templates")
+app = Flask(__name__, template_folder="/app/app/templates")
 app.secret_key = "supersecretkey"
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['PROCESSED_FOLDER'] = PROCESSED_FOLDER

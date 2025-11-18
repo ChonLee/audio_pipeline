@@ -1,0 +1,16 @@
+# Python cache files
+__pycache__/
+*.pyc
+
+# System files
+.DS_Store
+
+# Local environment files
+.env
+
+# Config with secrets
+config/
+
+# Uploads and processed files
+uploads/
+processed/

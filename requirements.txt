@@ -1,3 +1,4 @@
 Flask>=2.3,<3
 pydub==0.25.1
 mutagen==1.46.0
+paramiko
